@@ -14,6 +14,10 @@
 # ---
 
 # %%
+# %load_ext autoreload
+# %autoreload 2
+
+# %%
 import pandas as pd
 import transformers
 import torch
@@ -31,6 +35,12 @@ from transformers import AutoModel
 from transformers import DistilBertForSequenceClassification
 from transformers import DistilBertConfig
 from transformers import AutoModelForSequenceClassification
+
+# %%
+from sklearn.linear_model import LinearRegression
+
+# %%
+from collections import defaultdict
 
 # %%
 labels = ['cohesion', 'syntax', 'vocabulary', 'phraseology', 'grammar',
@@ -53,7 +63,7 @@ class ELLDS(Dataset):
     def __init__(self, df):
         self.df = df
     def __getitem__(self, idx):
-        return dftr.iloc[idx]['full_text'], dftr.iloc[idx][labels]
+        return df.iloc[idx]['full_text'], df.iloc[idx][labels]
     def __len__(self):
         return len(self.df)
 
@@ -63,77 +73,65 @@ dftr = pd.read_csv('data/train.csv')
 dfte = pd.read_csv('data/test.csv')
 
 # %%
-mskf = MultilabelStratifiedKFold(n_splits=5, shuffle=True, random_state=0)
-
-# %%
-bsz = 64
-feats = []
-for i in range(0, len(dftr), bsz):
-    inputs = tokenizer(dftr.iloc[i:i+bsz]['full_text'].tolist(),truncation=True, padding=True, return_tensors='pt')
-    inputs = inputs.to(device)
-    with torch.no_grad():
-        out = model(**inputs)
-        feats.append(out.last_hidden_state.mean(axis=1))
-
-# %%
-npfeats = []
-for f in feats:
-    npfeats.extend(f.detach().cpu().numpy())
-
-# %%
-np.array(npfeats)
-
-# %%
-np.array(npfeats).shape
-
-# %%
-for tr_idx, va_idx in mskf.split(dftr['full_text'], dftr[labels]):
-    tr_idx = np.random.choice(tr_idx,len(tr_idx), replace=False)
-    for i in range(0, len(tr_idx), 16):
-        inputs = tokenizer(dftr.iloc[tr_idx[i:i+16]]['full_text'].tolist(),truncation=True, padding=True, return_tensors='pt')
-        with torch.no_grad():
-            out = model(**inputs)
-            out.last_hidden_state.mean(axis=1)
-        break
-    break
-
-# %%
-
-# %%
-dftr.iloc[tr_idx]['cohesion'].value_counts()
-
-# %%
-dftr.iloc[va_idx]['cohesion'].value_counts()
-
-# %%
-iter(tr_dl).next()
-
-# %%
-config
-
-# %%
-config.output_last_state=True
-
-# %%
-inputs = tokenizer(list(dftr.iloc[0:16]['full_text'].values), truncation=True, padding=True, return_tensors='pt')
-
-# %%
-inputs.input_ids.shape
-
-# %%
-with torch.no_grad():
-    output = model(**inputs)
-
-# %%
-output.last_hidden_state.mean(axis=1).shape
-
-# %%
-inputs.input_ids.shape
-
-# %%
-output.last_hidden_state
-
-# %%
 dftr.head()
 
 # %%
+mskf = MultilabelStratifiedKFold(n_splits=5, shuffle=True, random_state=0)
+
+
+# %%
+def get_feats(df, bsz=64):
+    feats = []
+    for i in range(0, len(df), bsz):
+        inputs = tokenizer(df.iloc[i:i+bsz]['full_text'].tolist(),truncation=True, padding=True, return_tensors='pt')
+        inputs = inputs.to(device)
+        with torch.no_grad():
+            out = model(**inputs)
+            feats.append(out.last_hidden_state.mean(axis=1).detach().cpu().numpy())
+    return feats
+
+
+# %%
+trfeats = np.concatenate(get_feats(dftr))
+
+# %%
+tefeats = np.concatenate(get_feats(dfte))
+
+# %%
+labmodels = defaultdict(list)
+va_idxs = []
+for tr_idx, va_idx in mskf.split(trfeats, dftr[labels]):
+    va_idxs.append(va_idx)
+    tr_idx = np.random.choice(tr_idx,len(tr_idx), replace=False)
+    Xtr = trfeats[tr_idx]
+    ytr = dftr.iloc[tr_idx][labels]
+    for label in labels:
+        lrm = LinearRegression()
+        lrm.fit(Xtr,ytr[label])
+        labmodels[label].append(lrm) 
+        
+
+# %%
+from sklearn.metrics import mean_squared_error
+import pdb
+def RMSE(targ, pred):
+    return mean_squared_error(targ,pred)
+def MCRMSE(targ, pred):
+    return [RMSE(targ[label],pred[label]) for label in labels]
+
+
+# %%
+pred = defaultdict(list)
+targ = defaultdict(list)
+rmse = defaultdict(list)
+for i,va_idx in enumerate(va_idxs):
+    Xte = trfeats[va_idx]
+    yte = dftr.iloc[va_idx][labels]
+    for label in labels:
+        lrm = labmodels[label][i]
+        pred[label].append(lrm.predict(Xte))
+        targ[label].append(yte[label])
+        rmse[label].append(RMSE(targ[label][-1], pred[label][-1]))
+
+# %%
+pd.DataFrame(rmse).mean().mean()
